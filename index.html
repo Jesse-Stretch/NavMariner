@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NavMariner Pro</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  body, html {margin:0; padding:0; height:100%; font-family:Arial,sans-serif;}
+  #map {height:100%; width:100%;}
+  .panel {
+    position:absolute; top:10px; left:10px; background:white;
+    padding:10px; border-radius:6px; box-shadow:0 0 6px rgba(0,0,0,0.3);
+    z-index:1000; font-size:14px;
+  }
+  .panel input {width:80px; margin:2px 0;}
+  .panel button {margin-top:4px; width:100%;}
+  #coords {
+    position:absolute; bottom:10px; left:10px;
+    background: rgba(255,255,255,0.9); padding:6px; border-radius:5px;
+    font-size:13px; z-index:1000;
+  }
+  .overlay-toggle {width:32px; height:32px; margin:2px; display:inline-block; cursor:pointer; border:1px solid #aaa; text-align:center; line-height:32px; font-weight:bold; border-radius:4px;}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="panel">
+  <b>NavMariner Pro</b><br><br>
+  Speed (knots):<br><input id="speed" type="number" value="20"><br><br>
+  Latitude:<br><input id="latInput" placeholder="49.2827"><br>
+  Longitude:<br><input id="lonInput" placeholder="-123.1207"><br>
+  <button onclick="addCoordWaypoint()">Add Waypoint</button><br>
+  <button onclick="undoLast()">Undo Last</button>
+  <button onclick="clearRoute()">Clear Route</button><br><br>
+  <button onclick="recenter()">Recenter on Me</button><br><br>
+  <b>Overlays</b><br>
+  <div>
+    <div class="overlay-toggle" id="tideToggle" onclick="toggleOverlay('tide')">T</div>
+    <div class="overlay-toggle" id="windToggle" onclick="toggleOverlay('wind')">W</div>
+    <div class="overlay-toggle" id="weatherToggle" onclick="toggleOverlay('weather')">☁</div>
+  </div><br>
+  <b>SAR Grid</b><br>
+  Grid type:<br>
+  <select id="sarType"><option value="rect">Rectangular</option><option value="sector">Sector</option></select><br>
+  Spacing (NM):<br><input id="sarSpacing" type="number" value="1"><br>
+  Size (NM):<br><input id="sarSize" type="number" value="3"><br>
+  <button onclick="generateSAR()">Generate Grid</button><br><br>
+  <div id="stats">Distance: 0 NM<br>ETA: 0 min</div>
+</div>
+
+<div id="coords">Lat: -- | Lon: --</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+const map = L.map('map').setView([49.2827, -123.1207],10);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18, attribution:'© OpenStreetMap'}).addTo(map);
+
+let waypoints = [], markers=[], line=L.polyline([], {color:'yellow'}).addTo(map);
+let previewLine = L.polyline([], {color:'yellow', dashArray:'5,5'}).addTo(map);
+let overlays = {tide:null, wind:null, weather:null};
+
+function toRad(d){return d*Math.PI/180;}
+function distanceNM(a,b){
+  const R=6371; const dLat=toRad(b.lat-a.lat); const dLon=toRad(b.lng-a.lng);
+  const lat1=toRad(a.lat), lat2=toRad(b.lat);
+  const h=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return (2*R*Math.asin(Math.sqrt(h)))*0.539957;
+}
+
+function updateRoute(){
+  line.setLatLngs(waypoints);
+  let dist=0;
+  for(let i=1;i<waypoints.length;i++) dist+=distanceNM(waypoints[i-1],waypoints[i]);
+  const speed=parseFloat(document.getElementById('speed').value)||1;
+  const etaMin=speed>0?(dist/speed)*60:0;
+  document.getElementById('stats').innerHTML=`Distance: ${dist.toFixed(2)} NM<br>ETA: ${etaMin.toFixed(0)} min`;
+}
+
+function addWaypoint(latlng){
+  const marker=L.marker(latlng).addTo(map);
+  markers.push(marker);
+  waypoints.push(latlng);
+  updateRoute();
+}
+
+function addCoordWaypoint(){
+  const lat=parseFloat(document.getElementById('latInput').value);
+  const lon=parseFloat(document.getElementById('lonInput').value);
+  if(isNaN(lat)||isNaN(lon)) return;
+  addWaypoint(L.latLng(lat,lon));
+  map.panTo([lat,lon]);
+}
+
+map.on('mousemove',e=>{
+  document.getElementById('coords').innerText=`Lat: ${e.latlng.lat.toFixed(5)} | Lon: ${e.latlng.lng.toFixed(5)}`;
+  if(waypoints.length>0) previewLine.setLatLngs([waypoints.at(-1),e.latlng]);
+});
+
+map.on('click',e=>{addWaypoint(e.latlng);});
+
+function undoLast(){if(markers.length>0){map.removeLayer(markers.pop());waypoints.pop();updateRoute();}}
+function clearRoute(){markers.forEach(m=>map.removeLayer(m));markers=[];waypoints=[];line.setLatLngs([]);previewLine.setLatLngs([]);updateRoute();}
+function recenter(){navigator.geolocation.getCurrentPosition(pos=>map.setView([pos.coords.latitude,pos.coords.longitude],12));}
+
+function toggleOverlay(type){
+  if(overlays[type]){map.removeLayer(overlays[type]); overlays[type]=null; return;}
+  if(type==='tide'){overlays[type]=L.tileLayer('https://tiles.opentopomap.org/{z}/{x}/{y}.png',{opacity:0.3}).addTo(map);}
+  if(type==='wind'){overlays[type]=L.tileLayer('https://tile.openweathermap.org/map/wind_new/{z}/{x}/{y}.png?appid=demo',{opacity:0.3}).addTo(map);}
+  if(type==='weather'){overlays[type]=L.tileLayer('https://tile.openweathermap.org/map/clouds_new/{z}/{x}/{y}.png?appid=demo',{opacity:0.3}).addTo(map);}
+}
+
+function generateSAR(){
+  const type=document.getElementById('sarType').value;
+  const spacing=parseFloat(document.getElementById('sarSpacing').value)||1;
+  const size=parseFloat(document.getElementById('sarSize').value)||3;
+  if(waypoints.length===0) return alert('Add a waypoint first');
+  const start=waypoints.at(-1);
+  if(type==='rect'){
+    for(let x=-size;x<=size;x+=spacing){
+      for(let y=-size;y<=size;y+=spacing){
+        const lat=start.lat+x*0.0145;
+        const lng=start.lng+y*0.0145;
+        L.circleMarker([lat,lng],{radius:4,color:'green'}).addTo(map);
+      }
+    }
+  } else if(type==='sector'){
+    for(let r=spacing;r<=size;r+=spacing){
+      for(let a=0;a<360;a+=30){
+        const lat=start.lat+r*0.0145*Math.cos(a*Math.PI/180);
+        const lng=start.lng+r*0.0145*Math.sin(a*Math.PI/180);
+        L.circleMarker([lat,lng],{radius:4,color:'orange'}).addTo(map);
+      }
+    }
+  }
+}
+</script>
+
+</body>
+</html>
