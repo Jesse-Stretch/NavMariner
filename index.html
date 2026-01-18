@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NavMariner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #0b1e2d;
+  color: white;
+}
+#topBar {
+  padding: 8px;
+  background: #102a44;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+input, select, button {
+  padding: 6px;
+  border-radius: 4px;
+  border: none;
+}
+button {
+  background: #ffcc00;
+  cursor: pointer;
+}
+button.active {
+  background: #4caf50;
+}
+#coords { font-size: 13px; }
+#info {
+  padding: 8px;
+  background: #081724;
+  font-size: 14px;
+}
+#map { height: calc(100vh - 190px); }
+</style>
+</head>
+
+<body>
+
+<div id="topBar">
+  <button onclick="locateMe()">📍 Locate</button>
+  <button id="followBtn" onclick="toggleFollow()">🧭 Follow</button>
+
+  Speed:
+  <input id="speedInput" type="number" value="20" style="width:60px">kts
+
+  Lat:
+  <input id="latInput" type="number" step="any" style="width:90px">
+  <select id="latHem"><option>N</option><option>S</option></select>
+
+  Lon:
+  <input id="lonInput" type="number" step="any" style="width:100px">
+  <select id="lonHem"><option>E</option><option>W</option></select>
+
+  <button onclick="addCoordWaypoint()">➕ WP</button>
+  <button onclick="undoLast()">↩ Undo</button>
+  <button onclick="clearRoute()">🗑 Clear</button>
+
+  <button onclick="toggleWeather()">🌦</button>
+  <button onclick="toggleWind()">💨</button>
+  <button onclick="toggleSea()">🌊</button>
+
+  <button onclick="drawRectGrid()">▦ SAR</button>
+  <button onclick="drawSectorGrid()">◔ SAR</button>
+
+  <span id="coords">Cursor: -- , --</span>
+</div>
+
+<div id="info">
+  Distance: <span id="distance">0.00</span> NM |
+  ETA: <span id="eta">0</span> min |
+  Bearing: <span id="bearing">--</span>°
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+let map = L.map('map', { dragging:false }).setView([49.2827, -123.1207], 9);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18}).addTo(map);
+
+let weatherLayer = L.tileLayer('https://tile.openweathermap.org/map/clouds/{z}/{x}/{y}.png');
+let windLayer = L.tileLayer('https://tile.openweathermap.org/map/wind/{z}/{x}/{y}.png');
+let seaLayer = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png');
+
+let waypoints=[], markers=[];
+let routeLine=L.polyline([], {color:'yellow'}).addTo(map);
+let previewLine=L.polyline([], {color:'yellow', dashArray:'5,5'}).addTo(map);
+let sarLayer=L.layerGroup().addTo(map);
+
+let followMode=false, currentMarker=null;
+let pressTimer=null, isDragging=false;
+
+function locateMe(){ map.locate({setView:true,maxZoom:14}); }
+function toggleFollow(){
+  followMode=!followMode;
+  followBtn.classList.toggle("active",followMode);
+}
+
+map.on('locationfound',e=>{
+  if(!currentMarker) currentMarker=L.marker(e.latlng).addTo(map);
+  else currentMarker.setLatLng(e.latlng);
+  if(followMode) map.setView(e.latlng);
+});
+
+const mapEl=map.getContainer();
+mapEl.addEventListener('mousedown',startPress);
+mapEl.addEventListener('touchstart',startPress);
+mapEl.addEventListener('mouseup',endPress);
+mapEl.addEventListener('touchend',endPress);
+
+function startPress(){
+  isDragging=false;
+  pressTimer=setTimeout(()=>{
+    isDragging=true;
+    map.dragging.enable();
+  },300);
+}
+
+function endPress(e){
+  clearTimeout(pressTimer);
+  map.dragging.disable();
+  if(isDragging) return;
+  const ev=e.changedTouches?e.changedTouches[0]:e;
+  const latlng=map.mouseEventToLatLng(ev);
+  addWaypoint(latlng.lat,latlng.lng);
+}
+
+function addCoordWaypoint(){
+  let lat=parseFloat(latInput.value);
+  let lon=parseFloat(lonInput.value);
+  if(latHem.value==="S") lat*=-1;
+  if(lonHem.value==="W") lon*=-1;
+  if(isNaN(lat)||isNaN(lon)) return;
+  addWaypoint(lat,lon);
+}
+
+function addWaypoint(lat,lon){
+  let pt=[lat,lon];
+  waypoints.push(pt);
+  markers.push(L.circleMarker(pt,{radius:6,color:'red'}).addTo(map));
+  routeLine.setLatLngs(waypoints);
+  updateStats();
+}
+
+function undoLast(){
+  if(!waypoints.length) return;
+  waypoints.pop();
+  map.removeLayer(markers.pop());
+  routeLine.setLatLngs(waypoints);
+  updateStats();
+}
+
+function clearRoute(){
+  waypoints=[];
+  markers.forEach(m=>map.removeLayer(m));
+  markers=[];
+  routeLine.setLatLngs([]);
+  previewLine.setLatLngs([]);
+  sarLayer.clearLayers();
+  updateStats();
+}
+
+function updateStats(){
+  let meters=0;
+  for(let i=1;i<waypoints.length;i++)
+    meters+=map.distance(waypoints[i-1],waypoints[i]);
+  let nm=meters/1852;
+  let speed=parseFloat(speedInput.value)||1;
+  distance.innerText=nm.toFixed(2);
+  eta.innerText=Math.round((nm/speed)*60);
+
+  if(waypoints.length>1){
+    let a=waypoints.at(-2), b=waypoints.at(-1);
+    let brg=(Math.atan2(
+      Math.sin((b[1]-a[1])*Math.PI/180)*Math.cos(b[0]*Math.PI/180),
+      Math.cos(a[0]*Math.PI/180)*Math.sin(b[0]*Math.PI/180)-
+      Math.sin(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.cos((b[1]-a[1])*Math.PI/180)
+    )*180/Math.PI+360)%360;
+    bearing.innerText=brg.toFixed(0);
+  } else bearing.innerText="--";
+}
+
+speedInput.addEventListener("input",updateStats);
+
+map.on('mousemove',e=>{
+  coords.innerText=`Cursor: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`;
+  if(waypoints.length) previewLine.setLatLngs([waypoints.at(-1),e.latlng]);
+});
+
+function toggleWeather(){ map.hasLayer(weatherLayer)?map.removeLayer(weatherLayer):weatherLayer.addTo(map); }
+function toggleWind(){ map.hasLayer(windLayer)?map.removeLayer(windLayer):windLayer.addTo(map); }
+function toggleSea(){ map.hasLayer(seaLayer)?map.removeLayer(seaLayer):seaLayer.addTo(map); }
+
+function drawRectGrid(){
+  sarLayer.clearLayers();
+  let c=waypoints.at(-1)||map.getCenter();
+  let d=0.02;
+  for(let i=-2;i<=2;i++)
+    for(let j=-2;j<=2;j++)
+      L.rectangle([[c.lat+i*d,c.lng+j*d],[c.lat+(i+1)*d,c.lng+(j+1)*d]],
+      {color:'cyan',weight:1,fill:false}).addTo(sarLayer);
+}
+
+function drawSectorGrid(){
+  sarLayer.clearLayers();
+  let c=waypoints.at(-1)||map.getCenter();
+  for(let a=0;a<360;a+=30)
+    L.polyline([c,[c.lat+0.05*Math.cos(a*Math.PI/180),c.lng+0.05*Math.sin(a*Math.PI/180)]],
+    {color:'orange'}).addTo(sarLayer);
+}
+</script>
+
+</body>
+</html>
