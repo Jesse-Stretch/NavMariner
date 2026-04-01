@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NavMariner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body { margin:0; font-family:Arial; background:#0b1e2d; color:white; }
+
+#topBar { background:#102a44; padding:6px; display:flex; flex-direction:column; gap:5px; }
+
+.row { display:flex; gap:5px; flex-wrap:wrap; align-items:center; }
+
+button {
+  background:#ffcc00;
+  border:none;
+  padding:6px 8px;
+  border-radius:4px;
+  font-weight:bold;
+}
+
+input {
+  padding:5px;
+  border-radius:4px;
+  border:none;
+  width:80px;
+}
+
+select {
+  padding:5px;
+  border-radius:4px;
+  border:none;
+}
+
+#info { font-size:13px; padding:6px; background:#081724; }
+
+#fuelPanel { font-size:12px; padding:6px; }
+
+#map { height: calc(100vh - 200px); }
+
+.fab {
+  position:absolute;
+  right:10px;
+  background:#ffcc00;
+  color:black;
+  width:44px;
+  height:44px;
+  border-radius:50%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:18px;
+}
+
+#addBtn { bottom:130px; }
+#undoBtn { bottom:75px; }
+#clearBtn { bottom:20px; }
+</style>
+</head>
+
+<body>
+
+<div id="topBar">
+  <div class="row">
+    <button onclick="locateMe()">📍</button>
+    Speed <input id="speedInput" type="number" value="20">
+    <button id="proToggle">FREE</button>
+  </div>
+
+  <div class="row">
+    Lat <input id="latInput" type="number" step="any">
+    <select id="latDir">
+      <option>N</option>
+      <option>S</option>
+    </select>
+
+    Lon <input id="lonInput" type="number" step="any">
+    <select id="lonDir">
+      <option>W</option>
+      <option>E</option>
+    </select>
+
+    <button onclick="addCoordWaypoint()">Add</button>
+  </div>
+</div>
+
+<div id="info">
+  Dist: <span id="distance">0</span> NM |
+  ETA: <span id="eta">0</span> min |
+  Brg: <span id="bearing">--</span>°
+</div>
+
+<div id="fuelPanel">
+  Burn <input id="burnRate" type="number" value="10">
+  Fuel <input id="fuelOnboard" type="number" value="100">
+  Need: <span id="fuelNeeded">0</span> |
+  Range: <span id="safeRange">0</span>
+</div>
+
+<div id="map"></div>
+
+<div id="addBtn" class="fab" onclick="addWaypointFromCenter()">+</div>
+<div id="undoBtn" class="fab" onclick="undoLast()">↩</div>
+<div id="clearBtn" class="fab" onclick="clearRoute()">🗑</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+let map = L.map('map').setView([49.28,-123.12],9);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// ✅ CLICK TO ADD WAYPOINT (THIS IS THE FIX)
+map.on('click', function(e){
+  addWaypoint(e.latlng.lat, e.latlng.lng);
+});
+
+let waypoints = [];
+let markers = [];
+let routeLine = L.polyline([], {color:'yellow'}).addTo(map);
+
+let isPro = false;
+
+// LOCATION
+function locateMe(){
+  map.locate({setView:true});
+}
+
+// WAYPOINTS
+function addWaypoint(lat, lon){
+  let pt = [lat, lon];
+
+  if(waypoints.length && isPro){
+    let last = waypoints[waypoints.length-1];
+    if(lineCrossesLand(last, pt)){
+      let mid = getDetourPoint(last, pt);
+      insertWaypoint(mid);
+    }
+  }
+
+  insertWaypoint(pt);
+}
+
+function insertWaypoint(pt){
+  waypoints.push(pt);
+  markers.push(L.circleMarker(pt,{radius:6,color:'red'}).addTo(map));
+  routeLine.setLatLngs(waypoints);
+  updateStats();
+}
+
+function addWaypointFromCenter(){
+  let c = map.getCenter();
+  addWaypoint(c.lat, c.lng);
+}
+
+// ✅ LAT/LON INPUT WITH N/S/E/W
+function addCoordWaypoint(){
+  let lat = parseFloat(latInput.value);
+  let lon = parseFloat(lonInput.value);
+
+  if(isNaN(lat) || isNaN(lon)) return;
+
+  if(latDir.value === "S") lat *= -1;
+  if(lonDir.value === "W") lon *= -1;
+
+  addWaypoint(lat, lon);
+}
+
+// UNDO / CLEAR
+function undoLast(){
+  if(!waypoints.length) return;
+  waypoints.pop();
+  map.removeLayer(markers.pop());
+  routeLine.setLatLngs(waypoints);
+  updateStats();
+}
+
+function clearRoute(){
+  waypoints = [];
+  markers.forEach(m=>map.removeLayer(m));
+  markers = [];
+  routeLine.setLatLngs([]);
+  updateStats();
+}
+
+// STATS
+function updateStats(){
+  let meters = 0;
+
+  for(let i=1;i<waypoints.length;i++){
+    meters += map.distance(waypoints[i-1], waypoints[i]);
+  }
+
+  let nm = meters / 1852;
+  distance.innerText = nm.toFixed(2);
+
+  let speed = speedInput.value || 1;
+  eta.innerText = Math.round((nm / speed) * 60);
+
+  if(waypoints.length > 1){
+    let a = waypoints[waypoints.length-2];
+    let b = waypoints[waypoints.length-1];
+
+    let brg = (Math.atan2(
+      Math.sin((b[1]-a[1])*Math.PI/180)*Math.cos(b[0]*Math.PI/180),
+      Math.cos(a[0]*Math.PI/180)*Math.sin(b[0]*Math.PI/180) -
+      Math.sin(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.cos((b[1]-a[1])*Math.PI/180)
+    )*180/Math.PI + 360) % 360;
+
+    bearing.innerText = brg.toFixed(0);
+  } else {
+    bearing.innerText = "--";
+  }
+
+  updateFuel(nm);
+}
+
+// FUEL
+function updateFuel(nm){
+  let burn = burnRate.value || 0;
+  let fuel = fuelOnboard.value || 0;
+  let speed = speedInput.value || 1;
+
+  let hours = nm / speed;
+  let need = hours * burn;
+
+  fuelNeeded.innerText = need.toFixed(1);
+  safeRange.innerText = burn ? (fuel / burn * speed).toFixed(1) : 0;
+}
+
+// SIMPLE LAND AVOIDANCE
+function lineCrossesLand(a,b){
+  return Math.abs(a[0]-b[0]) > 0.5 && Math.abs(a[1]-b[1]) > 0.5;
+}
+
+function getDetourPoint(a,b){
+  let midLat = (a[0]+b[0])/2;
+  let midLon = (a[1]+b[1])/2;
+  return [midLat + 0.1, midLon - 0.1];
+}
+
+// PRO
+proToggle.onclick = ()=>{
+  isPro = !isPro;
+  proToggle.innerText = isPro ? "PRO" : "FREE";
+};
+</script>
+
+</body>
+</html>
