@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NavMariner</title>
+
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+
+<!-- PWA -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#102a44">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body { margin:0; font-family:Arial; background:#0b1e2d; color:white; touch-action:manipulation; }
+
+#topBar {
+  background:#102a44;
+  padding:6px;
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+}
+
+input, button, select {
+  padding:8px;
+  border:none;
+  border-radius:6px;
+  font-size:14px;
+}
+
+#speedInput { width:70px; }
+
+button { background:#ffcc00; font-weight:bold; }
+
+#map { height:calc(100vh - 130px); }
+
+.info { font-size:13px; text-align:center; }
+
+.coordLabel {
+  background: rgba(0,0,0,0.75);
+  color: #ffcc00;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: 5px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="topBar">
+
+<div style="text-align:center;font-weight:bold;">NavMariner</div>
+
+<div style="display:flex;gap:5px;">
+<input id="latInput" placeholder="Lat">
+<select id="latDir"><option>N</option><option>S</option></select>
+
+<input id="lonInput" placeholder="Lon">
+<select id="lonDir"><option>W</option><option>E</option></select>
+
+<button onclick="addManual()">Add</button>
+</div>
+
+<div style="display:flex;gap:5px;">
+<input id="speedInput" placeholder="kt">
+<button onclick="locateMe()">📍</button>
+<button onclick="clearAll()">✕</button>
+</div>
+
+<div class="info">
+<span id="distanceOut">0</span> NM | ETA: <span id="etaOut">--</span>
+</div>
+
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+let map = L.map('map', {zoomControl:false}).setView([49.37,-123.76],10);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+L.control.zoom({position:'bottomright'}).addTo(map);
+
+let waypoints=[], markers=[], labels=[];
+let routeLine = L.polyline([], {color:'yellow',weight:4}).addTo(map);
+let landPolygons=[];
+
+// LOAD LAND
+fetch('https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/110m/physical/ne_110m_land.geojson')
+.then(r=>r.json())
+.then(data=>{
+  data.features.forEach(f=>{
+    if(f.geometry.type==="Polygon"){
+      landPolygons.push(f.geometry.coordinates);
+    } else {
+      f.geometry.coordinates.forEach(p=>landPolygons.push(p));
+    }
+  });
+});
+
+// LAND CHECK
+function pointInPoly(pt, poly){
+  let x=pt[1], y=pt[0], inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    let xi=poly[i][0], yi=poly[i][1];
+    let xj=poly[j][0], yj=poly[j][1];
+    let intersect=((yi>y)!=(yj>y)) &&
+      (x<(xj-xi)*(y-yi)/(yj-yi)+xi);
+    if(intersect) inside=!inside;
+  }
+  return inside;
+}
+
+function isLand(pt){
+  for(let poly of landPolygons){
+    for(let ring of poly){
+      if(pointInPoly(pt,ring)) return true;
+    }
+  }
+  return false;
+}
+
+// GRID (optimized)
+let nodes=[];
+let gridBuilt=false;
+let gridSize=0.02;
+
+function buildGrid(){
+  if(gridBuilt) return;
+
+  let b = map.getBounds();
+
+  for(let lat=b.getSouth(); lat<b.getNorth(); lat+=gridSize){
+    for(let lon=b.getWest(); lon<b.getEast(); lon+=gridSize){
+      let p=[lat,lon];
+      if(!isLand(p)) nodes.push(p);
+    }
+  }
+
+  gridBuilt=true;
+}
+
+// NEAREST NODE
+function nearestNode(pt){
+  let best=null, dist=Infinity;
+  for(let n of nodes){
+    let d=(n[0]-pt[0])**2+(n[1]-pt[1])**2;
+    if(d<dist){ dist=d; best=n; }
+  }
+  return best;
+}
+
+// SIMPLE A*
+function routeAStar(start,end){
+  let path=[start];
+  let current=start;
+
+  for(let i=0;i<200;i++){
+    let next=null, best=Infinity;
+
+    for(let n of nodes){
+      let d=Math.hypot(n[0]-current[0],n[1]-current[1]);
+      let h=Math.hypot(n[0]-end[0],n[1]-end[1]);
+      if(d<gridSize*1.5 && h<best){
+        best=h;
+        next=n;
+      }
+    }
+
+    if(!next) break;
+
+    path.push(next);
+    current=next;
+
+    if(Math.hypot(current[0]-end[0],current[1]-end[1])<gridSize){
+      path.push(end);
+      break;
+    }
+  }
+
+  return path;
+}
+
+// ADD WAYPOINT
+map.on('click', e=>addWaypoint(e.latlng.lat,e.latlng.lng));
+
+function addWaypoint(lat,lon){
+
+  waypoints.push([lat,lon]);
+
+  let m=L.circleMarker([lat,lon],{radius:7,color:'red'}).addTo(map);
+
+  let label=L.tooltip({permanent:true,offset:[0,-10],className:'coordLabel'})
+  .setContent(lat.toFixed(4)+", "+lon.toFixed(4))
+  .setLatLng([lat,lon]).addTo(map);
+
+  m.on('click', ()=>{
+    let i=markers.indexOf(m);
+    map.removeLayer(m);
+    map.removeLayer(labels[i]);
+    markers.splice(i,1);
+    labels.splice(i,1);
+    waypoints.splice(i,1);
+    calculateRoute();
+  });
+
+  markers.push(m);
+  labels.push(label);
+
+  calculateRoute();
+}
+
+// MANUAL ADD
+function addManual(){
+  let lat=parseFloat(latInput.value);
+  let lon=parseFloat(lonInput.value);
+
+  if(latDir.value==="S") lat*=-1;
+  if(lonDir.value==="W") lon*=-1;
+
+  if(isNaN(lat)||isNaN(lon)) return alert("Invalid");
+
+  addWaypoint(lat,lon);
+}
+
+// ROUTE
+function calculateRoute(){
+
+  buildGrid();
+
+  if(waypoints.length<2){ routeLine.setLatLngs([]); return; }
+
+  let full=[];
+
+  for(let i=1;i<waypoints.length;i++){
+    let s=nearestNode(waypoints[i-1]);
+    let e=nearestNode(waypoints[i]);
+    let seg=routeAStar(s,e);
+
+    if(i>1) seg.shift();
+    full=full.concat(seg);
+  }
+
+  routeLine.setLatLngs(full);
+  updateStats(full);
+}
+
+// DIST + ETA
+function hav(a,b){
+  let R=6371e3;
+  let φ1=a[0]*Math.PI/180, φ2=b[0]*Math.PI/180;
+  let dφ=(b[0]-a[0])*Math.PI/180;
+  let dλ=(b[1]-a[1])*Math.PI/180;
+  let x=Math.sin(dφ/2)**2+Math.cos(φ1)*Math.cos(φ2)*Math.sin(dλ/2)**2;
+  return (R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)))/1852;
+}
+
+function updateStats(path){
+  let d=0;
+  for(let i=1;i<path.length;i++) d+=hav(path[i-1],path[i]);
+  distanceOut.innerText=d.toFixed(2);
+
+  let s=parseFloat(speedInput.value);
+  if(s>0){
+    let h=d/s, hr=Math.floor(h), m=Math.round((h-hr)*60);
+    etaOut.innerText=hr+"h "+m+"m";
+  }
+}
+
+speedInput.addEventListener("input", ()=>{
+  let path = routeLine.getLatLngs().map(p=>[p.lat,p.lng]);
+  updateStats(path);
+});
+
+// CLEAR
+function clearAll(){
+  markers.forEach(m=>map.removeLayer(m));
+  labels.forEach(l=>map.removeLayer(l));
+  markers=[]; labels=[]; waypoints=[];
+  routeLine.setLatLngs([]);
+}
+
+// GPS
+function locateMe(){ map.locate({setView:true}); }
+
+</script>
+
+</body>
+</html>
