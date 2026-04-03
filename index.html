@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NavMariner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body {
+  margin:0;
+  font-family:Arial;
+  background:#0b1e2d;
+  color:white;
+}
+
+#topBar {
+  background:#102a44;
+  padding:10px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+
+.row {
+  display:flex;
+  gap:6px;
+  flex-wrap:wrap;
+  align-items:center;
+}
+
+input {
+  padding:6px;
+  border-radius:4px;
+  border:none;
+  width:110px;
+}
+
+button {
+  background:#ffcc00;
+  border:none;
+  padding:6px 12px;
+  border-radius:4px;
+  font-weight:bold;
+  cursor:pointer;
+}
+
+button:hover {
+  background:#ffd633;
+}
+
+#map {
+  height: calc(100vh - 140px);
+}
+
+.small {
+  font-size:11px;
+  opacity:0.7;
+}
+</style>
+</head>
+
+<body>
+
+<div id="topBar">
+
+  <div class="row">
+    <strong>NavMariner</strong>
+  </div>
+
+  <div class="row">
+    <input id="latInput" placeholder="Lat (e.g. 49.28 or 49 17.2 N)">
+    <input id="lonInput" placeholder="Lon (e.g. 123.12 or 123 7.5 W)">
+    <button onclick="addManual()">Add Waypoint</button>
+  </div>
+
+  <div class="row">
+    <button onclick="clearAll()">Clear</button>
+    <button onclick="locateMe()">📍 My Location</button>
+  </div>
+
+  <div class="small">
+    Tap map to add • Tap waypoint to delete • No symbols needed for coords
+  </div>
+
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+// INIT MAP
+let map = L.map('map').setView([49.28,-123.12],9);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  maxZoom:19
+}).addTo(map);
+
+// DATA
+let waypoints = [];
+let markers = [];
+let routeLine = L.polyline([], {color:'yellow', weight:3}).addTo(map);
+let landPolygons = [];
+
+// LOAD COASTLINE
+fetch('https://raw.githubusercontent.com/johan/world.geo.json/master/countries/CAN.geo.json')
+.then(res=>res.json())
+.then(data=>{
+  data.features.forEach(f=>{
+    landPolygons.push(f.geometry.coordinates);
+  });
+  console.log("Coastline loaded");
+});
+
+// MAP CLICK
+map.on('click', e=>{
+  addWaypoint(e.latlng.lat, e.latlng.lng);
+});
+
+// ADD WAYPOINT
+function addWaypoint(lat, lon){
+  waypoints.push([lat, lon]);
+
+  let marker = L.circleMarker([lat, lon], {
+    radius:6,
+    color:'red'
+  }).addTo(map);
+
+  marker.on('click', function(e){
+    L.DomEvent.stopPropagation(e);
+
+    let i = markers.indexOf(marker);
+    markers.splice(i,1);
+    waypoints.splice(i,1);
+
+    map.removeLayer(marker);
+    calculateRoute();
+  });
+
+  markers.push(marker);
+
+  calculateRoute();
+}
+
+// CLEAR
+function clearAll(){
+  waypoints = [];
+  markers.forEach(m=>map.removeLayer(m));
+  markers = [];
+  routeLine.setLatLngs([]);
+}
+
+// SMART PARSER
+function parseCoord(input, isLat){
+  input = input.trim().toUpperCase();
+
+  let dir = null;
+  if(input.includes("S") || input.includes("W")) dir = -1;
+  else if(input.includes("N") || input.includes("E")) dir = 1;
+
+  input = input.replace(/[NSEW]/g,'');
+
+  let parts = input.split(/[\s]+/).filter(p=>p);
+
+  let value = 0;
+
+  if(parts.length === 1){
+    value = parseFloat(parts[0]);
+  }
+  else if(parts.length === 2){
+    value = parseFloat(parts[0]) + (parseFloat(parts[1]) / 60);
+  }
+  else if(parts.length === 3){
+    value = parseFloat(parts[0]) + (parseFloat(parts[1]) / 60) + (parseFloat(parts[2]) / 3600);
+  }
+
+  if(isNaN(value)) return null;
+
+  if(dir !== null){
+    value *= dir;
+  } else {
+    if(isLat && value < 0) value = Math.abs(value);
+    if(!isLat) value = -Math.abs(value); // default West
+  }
+
+  return value;
+}
+
+// ADD MANUAL
+function addManual(){
+  let latRaw = document.getElementById("latInput").value;
+  let lonRaw = document.getElementById("lonInput").value;
+
+  let lat = parseCoord(latRaw, true);
+  let lon = parseCoord(lonRaw, false);
+
+  if(lat === null || lon === null){
+    alert("Invalid coordinate format");
+    return;
+  }
+
+  addWaypoint(lat, lon);
+
+  document.getElementById("latInput").value = "";
+  document.getElementById("lonInput").value = "";
+}
+
+// POINT IN POLYGON
+function pointInPoly(point, vs){
+  let x = point[1], y = point[0];
+  let inside = false;
+
+  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+    let xi = vs[i][0], yi = vs[i][1];
+    let xj = vs[j][0], yj = vs[j][1];
+
+    let intersect = ((yi > y) != (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+
+    if (intersect) inside = !inside;
+  }
+
+  return inside;
+}
+
+// LAND CHECK
+function isLand(lat, lon){
+  for(let poly of landPolygons){
+    for(let ring of poly){
+      if(pointInPoly([lat, lon], ring)) return true;
+    }
+  }
+  return false;
+}
+
+// PATHFINDING
+function findPath(start, end){
+  let step = 0.02;
+  let open = [start];
+  let cameFrom = {};
+  let visited = new Set();
+
+  function key(p){ return p[0].toFixed(2)+","+p[1].toFixed(2); }
+
+  while(open.length){
+    let current = open.shift();
+    let k = key(current);
+
+    if(visited.has(k)) continue;
+    visited.add(k);
+
+    if(Math.abs(current[0]-end[0]) < step &&
+       Math.abs(current[1]-end[1]) < step){
+
+      let path = [];
+      while(k){
+        let parts = k.split(",");
+        path.push([parseFloat(parts[0]), parseFloat(parts[1])]);
+        k = cameFrom[k];
+      }
+
+      return path.reverse();
+    }
+
+    let dirs = [
+      [step,0],[-step,0],[0,step],[0,-step],
+      [step,step],[-step,-step],[step,-step],[-step,step]
+    ];
+
+    for(let d of dirs){
+      let next = [current[0]+d[0], current[1]+d[1]];
+      let nk = key(next);
+
+      if(isLand(next[0], next[1])) continue;
+      if(visited.has(nk)) continue;
+
+      cameFrom[nk] = k;
+      open.push(next);
+    }
+  }
+
+  return [start,end];
+}
+
+// ROUTE
+function calculateRoute(){
+  let fullPath = [];
+
+  for(let i=1;i<waypoints.length;i++){
+    let segment = findPath(waypoints[i-1], waypoints[i]);
+    fullPath = fullPath.concat(segment);
+  }
+
+  routeLine.setLatLngs(fullPath);
+}
+
+// GPS
+function locateMe(){
+  map.locate({setView:true});
+}
+
+</script>
+
+</body>
+</html>
