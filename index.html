@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NavMariner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+body { margin:0; font-family:Arial; background:#0b1e2d; color:white; }
+
+#topBar {
+  background:#102a44;
+  padding:5px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+
+input, button {
+  padding:5px;
+  border:none;
+  border-radius:5px;
+  font-size:13px;
+}
+
+#speedInput { width:60px; }
+
+button { background:#ffcc00; font-weight:bold; }
+
+#map { height:calc(100vh - 110px); }
+
+.info { font-size:12px; text-align:center; }
+
+.coordLabel {
+  background: rgba(0,0,0,0.7);
+  color: #ffcc00;
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="topBar">
+
+<div style="text-align:center;font-weight:bold;">NavMariner</div>
+
+<div style="display:flex;gap:5px;">
+<input id="latInput" placeholder="Lat">
+<input id="lonInput" placeholder="Lon">
+<button onclick="addManual()">Add</button>
+</div>
+
+<div style="display:flex;gap:5px;">
+<input id="speedInput" placeholder="kt">
+<button onclick="locateMe()">📍</button>
+<button onclick="clearAll()">✕</button>
+<button onclick="togglePro()" id="proBtn">Free</button>
+</div>
+
+<div class="info">
+<span id="distanceOut">0</span> NM | ETA: <span id="etaOut">--</span>
+</div>
+
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+
+let map = L.map('map').setView([49.37,-123.76],10);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+let waypoints=[], markers=[], labels=[];
+let routeLine = L.polyline([], {color:'yellow',weight:4}).addTo(map);
+let landPolygons=[];
+let proMode=false;
+
+// LOAD LAND
+fetch('https://raw.githubusercontent.com/martynafford/natural-earth-geojson/master/110m/physical/ne_110m_land.geojson')
+.then(r=>r.json())
+.then(data=>{
+  data.features.forEach(f=>{
+    if(f.geometry.type==="Polygon"){
+      landPolygons.push(f.geometry.coordinates);
+    } else {
+      f.geometry.coordinates.forEach(p=>landPolygons.push(p));
+    }
+  });
+});
+
+// FORMAT
+function formatCoord(lat, lon){
+  return lat.toFixed(4)+", "+lon.toFixed(4);
+}
+
+// CLICK ADD
+map.on('click', e=>addWaypoint(e.latlng.lat,e.latlng.lng));
+
+// ADD WAYPOINT
+function addWaypoint(lat, lon){
+
+  waypoints.push([lat,lon]);
+
+  let m=L.circleMarker([lat,lon],{radius:6,color:'red'}).addTo(map);
+
+  let label=L.tooltip({permanent:true,offset:[0,-8],className:'coordLabel'})
+  .setContent(formatCoord(lat,lon))
+  .setLatLng([lat,lon])
+  .addTo(map);
+
+  m.on('click', e=>{
+    L.DomEvent.stopPropagation(e);
+
+    let popup = L.popup()
+      .setLatLng([lat,lon])
+      .setContent(`
+        <b>Waypoint</b><br>
+        ${formatCoord(lat,lon)}<br><br>
+        <button onclick="deleteWaypoint(${markers.indexOf(m)})">Delete</button>
+      `)
+      .openOn(map);
+  });
+
+  markers.push(m);
+  labels.push(label);
+
+  calculateRoute();
+}
+
+// DELETE
+function deleteWaypoint(i){
+  map.removeLayer(markers[i]);
+  map.removeLayer(labels[i]);
+  markers.splice(i,1);
+  labels.splice(i,1);
+  waypoints.splice(i,1);
+  calculateRoute();
+  map.closePopup();
+}
+
+// CLEAR
+function clearAll(){
+  markers.forEach(m=>map.removeLayer(m));
+  labels.forEach(l=>map.removeLayer(l));
+  markers=[]; labels=[]; waypoints=[];
+  routeLine.setLatLngs([]);
+  distanceOut.innerText="0";
+  etaOut.innerText="--";
+}
+
+// DIST
+function hav(a,b){
+  let R=6371e3;
+  let φ1=a[0]*Math.PI/180, φ2=b[0]*Math.PI/180;
+  let dφ=(b[0]-a[0])*Math.PI/180;
+  let dλ=(b[1]-a[1])*Math.PI/180;
+  let x=Math.sin(dφ/2)**2+Math.cos(φ1)*Math.cos(φ2)*Math.sin(dλ/2)**2;
+  return (R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)))/1852;
+}
+
+// POINT IN LAND
+function pointInPoly(pt, poly){
+  let x=pt[1], y=pt[0], inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    let xi=poly[i][0], yi=poly[i][1];
+    let xj=poly[j][0], yj=poly[j][1];
+    let intersect=((yi>y)!=(yj>y)) &&
+      (x<(xj-xi)*(y-yi)/(yj-yi)+xi);
+    if(intersect) inside=!inside;
+  }
+  return inside;
+}
+
+function isLand(pt){
+  for(let poly of landPolygons){
+    for(let ring of poly){
+      if(pointInPoly(pt,ring)) return true;
+    }
+  }
+  return false;
+}
+
+// 🔥 STRONG PATH CHECK
+function pathHitsLand(a,b){
+  let steps=100;
+  for(let i=0;i<=steps;i++){
+    let t=i/steps;
+    let p=[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+    if(isLand(p)) return true;
+  }
+  return false;
+}
+
+// 🔥 SMART DETOUR
+function detour(a,b,level){
+  let mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+
+  let base=0.2 + level*0.2;
+
+  let dirs=[
+    [1,0],[-1,0],[0,1],[0,-1],
+    [1,1],[-1,-1],[1,-1],[-1,1]
+  ];
+
+  for(let d of dirs){
+    let test=[mid[0]+d[0]*base, mid[1]+d[1]*base];
+    if(!pathHitsLand(a,test)&&!pathHitsLand(test,b)){
+      return test;
+    }
+  }
+  return null;
+}
+
+// BUILD
+function build(a,b,depth=0){
+  if(depth>10||!pathHitsLand(a,b)) return [a,b];
+
+  let m=detour(a,b,depth);
+  if(!m) return [a,b];
+
+  let p1=build(a,m,depth+1);
+  let p2=build(m,b,depth+1);
+
+  return p1.slice(0,-1).concat(p2);
+}
+
+// ROUTE
+function calculateRoute(){
+  if(waypoints.length<2){routeLine.setLatLngs([]);return;}
+
+  let full=[];
+
+  for(let i=1;i<waypoints.length;i++){
+    let seg=build(waypoints[i-1],waypoints[i]);
+    if(i>1) seg.shift();
+    full=full.concat(seg);
+  }
+
+  routeLine.setLatLngs(full);
+  updateStats(full);
+}
+
+// STATS
+function updateStats(path){
+  if(path.length<2){distanceOut.innerText="0";etaOut.innerText="--";return;}
+
+  let d=0;
+  for(let i=1;i<path.length;i++) d+=hav(path[i-1],path[i]);
+
+  distanceOut.innerText=d.toFixed(2);
+
+  let s=parseFloat(speedInput.value);
+  if(s>0){
+    let h=d/s, hr=Math.floor(h), m=Math.round((h-hr)*60);
+    etaOut.innerText=hr+"h "+m+"m";
+  } else etaOut.innerText="--";
+}
+
+// LIVE SPEED
+speedInput.addEventListener("input", ()=>{
+  let path = routeLine.getLatLngs().map(p=>[p.lat,p.lng]);
+  updateStats(path);
+});
+
+// GPS
+function locateMe(){ map.locate({setView:true}); }
+
+// PRO
+function togglePro(){
+  proMode=!proMode;
+  proBtn.innerText=proMode?"Pro":"Free";
+}
+
+</script>
+
+</body>
+</html>
